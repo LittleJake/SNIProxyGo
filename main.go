@@ -17,6 +17,7 @@ import (
 )
 
 var ForwardPort = 443
+var BufferSize = int64(1048576)
 var cfg conf
 
 type conf struct {
@@ -109,8 +110,8 @@ func serve(c net.Conn, raddr string) {
 
 	//fallback ip
 	if cfg.Fallback != "" {
-        forward(c, buf[:n], fmt.Sprintf("%s:%d", cfg.Fallback, ForwardPort), cfg.Fallback)
-    }
+		forward(c, buf[:n], fmt.Sprintf("%s:%d", cfg.Fallback, ForwardPort), cfg.Fallback)
+	}
 }
 
 func getSNIServerName(buf []byte) string {
@@ -176,22 +177,35 @@ func forward(conn net.Conn, data []byte, dst string, raddr string) {
 	<-con_chk
 }
 
-func ioReflector(dst io.WriteCloser, src io.Reader, isToClient bool, con_chk chan int, raddr string, dsts string) {
+func ioReflector(dst net.Conn, src net.Conn, isToClient bool, con_chk chan int, raddr string, dsts string) {
 	// Reflect IO stream to another.
-	defer on_disconnect(dst, con_chk)
-	written, _ := io.Copy(dst, src)
+	defer on_disconnect(dst, src, con_chk)
+	written := int64(0)
+	for {
+		src.SetDeadline(time.Now().Add(5 * time.Second))
+		dst.SetDeadline(time.Now().Add(5 * time.Second))
+		w, err := io.CopyN(dst, src, BufferSize)
+		written += w
+		// Automaticall close idle connection.
+		if err == io.EOF || w == 0 {
+			break
+		}
+	}
+
 	if isToClient {
 		serviceDebugger(fmt.Sprintf("[%v] -> [%v], Written %d bytes", dsts, raddr, written), 33)
 	} else {
 		serviceDebugger(fmt.Sprintf("[%v] -> [%v], Written %d bytes", raddr, dsts, written), 33)
 	}
 	dst.Close()
+	src.Close()
 	con_chk <- 1
 }
 
-func on_disconnect(dst io.WriteCloser, con_chk chan int) {
+func on_disconnect(dst io.WriteCloser, src io.ReadCloser, con_chk chan int) {
 	// On Close-> Force Disconnect another pair of connection.
 	dst.Close()
+	src.Close()
 	con_chk <- 1
 }
 
